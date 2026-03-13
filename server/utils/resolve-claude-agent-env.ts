@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 type EnvLike = Record<string, string | undefined>
@@ -8,20 +8,22 @@ interface ClaudeSettings {
   env?: Record<string, unknown>
 }
 
-function normalizeEnvValue(value: unknown): string | undefined {
+function normalizeEnvValue(key: string, value: unknown): string | undefined {
   if (value == null) return undefined
   if (typeof value === 'string') {
     // Filter out empty strings - they cause issues
     if (value.trim() === '') return undefined
     return value
   }
-  // Skip non-string values (objects, arrays, numbers, booleans) to prevent
-  // invalid header errors like "Invalid header name: '{...}'"
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value)
   }
-  // Skip object values - they would cause header errors
+  // ANTHROPIC_CUSTOM_HEADERS can be an object in settings.json — serialize it.
+  // Other object values are skipped to prevent "Invalid header name" errors.
   if (typeof value === 'object') {
+    if (key === 'ANTHROPIC_CUSTOM_HEADERS') {
+      try { return JSON.stringify(value) } catch { return undefined }
+    }
     return undefined
   }
   return undefined
@@ -36,7 +38,7 @@ function readClaudeSettingsEnv(): EnvLike {
 
     const env: EnvLike = {}
     for (const [key, value] of Object.entries(parsed.env)) {
-      const normalized = normalizeEnvValue(value)
+      const normalized = normalizeEnvValue(key, value)
       if (normalized !== undefined) {
         env[key] = normalized
       }
@@ -98,7 +100,7 @@ export function buildClaudeAgentEnv(): EnvLike {
  */
 export function getClaudeAgentDebugFilePath(): string | undefined {
   try {
-    const dir = join('/tmp', 'openpencil-claude-debug')
+    const dir = join(tmpdir(), 'openpencil-claude-debug')
     mkdirSync(dir, { recursive: true })
     return join(dir, 'claude-agent.log')
   } catch {

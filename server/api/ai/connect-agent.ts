@@ -94,7 +94,7 @@ async function connectClaudeCode(): Promise<ConnectResult> {
 /** Map raw Agent SDK errors to user-friendly messages */
 function friendlyClaudeError(raw: string): string {
   if (/process exited with code 1|invalid model|unknown model|model.*not/i.test(raw)) {
-    return 'Claude Code exited with code 1. Check your model mapping (e.g. ANTHROPIC_MODEL / default Sonnet model) and run "claude login" if needed.'
+    return 'Claude Code exited with code 1. Run "claude login" to authenticate, or set ANTHROPIC_API_KEY in ~/.claude/settings.json.'
   }
   if (/exited with code/i.test(raw)) {
     return 'Unable to connect. Claude Code process exited unexpectedly.'
