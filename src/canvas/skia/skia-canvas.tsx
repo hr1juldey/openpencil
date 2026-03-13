@@ -33,7 +33,6 @@ export default function SkiaCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const engineRef = useRef<SkiaEngine | null>(null)
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editingText, setEditingText] = useState<TextEditState | null>(null)
 
@@ -57,11 +56,9 @@ export default function SkiaCanvas() {
         engine.syncFromDocument()
         requestAnimationFrame(() => engine.zoomToFitContent())
 
-        setLoading(false)
       } catch (err) {
         console.error('SkiaCanvas init failed:', err)
         setError(String(err))
-        setLoading(false)
       }
     }
 
@@ -928,11 +925,7 @@ export default function SkiaCanvas() {
           }}
         />
       )}
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center text-muted-foreground">
-          Loading CanvasKit...
-        </div>
-      )}
+
       {error && (
         <div className="absolute inset-0 flex items-center justify-center text-destructive">
           Failed to load CanvasKit: {error}
