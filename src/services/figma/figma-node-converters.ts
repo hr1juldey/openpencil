@@ -406,6 +406,7 @@ function convertInstance(
         figma.symbolData?.symbolOverrides,
         figma.derivedSymbolData,
         figma.size,
+        ctx.symbolTree,
       )
       return convertFrame(
         { figma: treeNode.figma, children },
@@ -434,12 +435,28 @@ function convertInstance(
 /**
  * Apply INSTANCE overrides (fills, arcData) and derived data (sizes, transforms)
  * to SYMBOL children when inlining them into an instance.
+ *
+ * Figma's derivedSymbolData entries use virtual GUIDs that don't exist in the
+ * document's nodeChanges.  When the SYMBOL contains no nested INSTANCE nodes,
+ * the entries correspond 1:1 (by index) to a pre-order DFS of the SYMBOL tree
+ * sorted by ascending localID.  When nested INSTANCEs are present, the derived
+ * data also includes entries for expanded children of those nested instances,
+ * making derived.length > flatSymbol.length.
+ *
+ * Strategy:
+ * 1. Filter derived to length-1 guidPaths (direct symbol nodes, excluding nested).
+ * 2. If filtered count == flatSymbol count → direct index matching (proven correct).
+ * 3. Otherwise → expanded DFS sequential block: walk the SYMBOL tree in localID
+ *    order, recursively expanding INSTANCE children, and assign sequential slot
+ *    IDs starting from the first derived entry's localID.  Each symbol node's
+ *    slot ID is used as its guidPath key for derived/override lookups.
  */
 function applyInstanceOverrides(
   symbolNode: TreeNode,
   overrides: FigmaSymbolOverride[] | undefined,
   derived: FigmaDerivedSymbolDataEntry[] | undefined,
   instanceSize: { x: number; y: number } | undefined,
+  symbolTree: Map<string, TreeNode>,
 ): TreeNode[] {
   // If no derived data, fall back to simple scaling
   if (!derived || derived.length === 0) {
@@ -469,9 +486,7 @@ function applyInstanceOverrides(
     }
   }
 
-  // Flatten SYMBOL tree in pre-order DFS with children sorted by ascending GUID localID.
-  // derivedSymbolData entries follow creation order (ascending GUID), not the tree's
-  // z-order (descending position), so we must match that order.
+  // Flatten SYMBOL tree in pre-order DFS with children sorted by ascending GUID localID
   const flatSymbol: TreeNode[] = []
   function flattenDFS(node: TreeNode) {
     flatSymbol.push(node)
@@ -484,48 +499,167 @@ function applyInstanceOverrides(
   }
   flattenDFS(symbolNode)
 
-  // Map each SYMBOL node's GUID → guidPath key (from derived data, matched by index)
-  const nodeGuidToPathKey = new Map<string, string>()
-  for (let i = 0; i < Math.min(flatSymbol.length, derived.length); i++) {
-    const node = flatSymbol[i]
-    const d = derived[i]
-    if (node.figma.guid && d.guidPath?.guids?.length) {
-      nodeGuidToPathKey.set(
-        guidToString(node.figma.guid),
-        guidPathKey(d.guidPath.guids),
+  // Filter derived to length-1 guidPaths only (excludes nested instance entries)
+  const len1Derived = derived.filter(d => d.guidPath?.guids?.length === 1)
+
+  // Extract base session/localID from the first derived entry
+  const firstGuids = len1Derived[0]?.guidPath?.guids
+  const sessionID = firstGuids?.[0]?.sessionID
+  const firstLocalID = firstGuids?.[0]?.localID
+
+  // Resolve overrides and derived data to actual symbol tree nodes.
+  // nodeOverride/nodeDerived are keyed by node GUID string.
+  const nodeOverride = new Map<string, FigmaSymbolOverride>()
+  const nodeDerived = new Map<string, FigmaDerivedSymbolDataEntry>()
+
+  /** Resolve a pathKey's override/derived entries to a target node GUID. */
+  function resolveToNode(pathKey: string, nodeGuid: string) {
+    const d = derivedMap.get(pathKey)
+    if (d) nodeDerived.set(nodeGuid, d)
+    const ov = overrideMap.get(pathKey)
+    if (ov) nodeOverride.set(nodeGuid, ov)
+  }
+
+  if (len1Derived.length === flatSymbol.length) {
+    // Strategy 1: exact count match — direct index mapping (proven correct)
+    for (let i = 0; i < flatSymbol.length; i++) {
+      const node = flatSymbol[i]
+      const d = len1Derived[i]
+      if (node.figma.guid && d.guidPath?.guids?.length) {
+        resolveToNode(guidPathKey(d.guidPath.guids), guidToString(node.figma.guid))
+      }
+    }
+  } else if (firstLocalID !== undefined && sessionID !== undefined) {
+    // Strategy 2: hybrid skip-INSTANCE + expanded DFS.
+    // Figma uses two numbering schemes for virtual GUIDs:
+    //   - Skip-INSTANCE DFS for slot indices 0..skipCount-1
+    //     (walks the symbol tree but skips INSTANCE nodes entirely)
+    //   - Expanded DFS for slot indices >= skipCount
+    //     (walks the symbol tree expanding INSTANCE children inline)
+
+    // --- Skip-INSTANCE DFS: pathKey → nodeGuid ---
+    const skipPkToNode = new Map<string, string>()
+    let skipIdx = 0
+    function walkSkipInst(node: TreeNode) {
+      if (node.figma.type === 'INSTANCE') return // skip entirely
+      if (node.figma.guid) {
+        skipPkToNode.set(
+          `${sessionID}:${firstLocalID! + skipIdx}`,
+          guidToString(node.figma.guid),
+        )
+      }
+      skipIdx++
+      const sorted = [...node.children].sort((a, b) =>
+        (a.figma.guid?.localID ?? 0) - (b.figma.guid?.localID ?? 0),
       )
+      for (const c of sorted) walkSkipInst(c)
+    }
+    walkSkipInst(symbolNode)
+    const skipCount = skipIdx
+
+    // --- Expanded DFS: pathKey → nodeGuid (main-symbol nodes only) ---
+    const expPkToNode = new Map<string, string>()
+    let expIdx = 0
+    function walkExp(node: TreeNode, isMain: boolean) {
+      if (isMain && node.figma.guid) {
+        expPkToNode.set(
+          `${sessionID}:${firstLocalID! + expIdx}`,
+          guidToString(node.figma.guid),
+        )
+      }
+      expIdx++
+      // Expand INSTANCE children inline (excluding symbol root which shares
+      // the INSTANCE's own slot)
+      if (node.figma.type === 'INSTANCE') {
+        const cg = node.figma.overriddenSymbolID ?? node.figma.symbolData?.symbolID
+        if (cg) {
+          const sym = symbolTree.get(guidToString(cg))
+          if (sym) {
+            const sorted = [...sym.children].sort((a, b) =>
+              (a.figma.guid?.localID ?? 0) - (b.figma.guid?.localID ?? 0),
+            )
+            for (const c of sorted) walkExp(c, false)
+          }
+        }
+      }
+      const sorted = [...node.children].sort((a, b) =>
+        (a.figma.guid?.localID ?? 0) - (b.figma.guid?.localID ?? 0),
+      )
+      for (const c of sorted) walkExp(c, isMain)
+    }
+    walkExp(symbolNode, true)
+
+    // Merge: skip-INSTANCE for indices < skipCount, expanded for >= skipCount
+    const unifiedPkToNode = new Map<string, string>()
+    for (const [pk, ng] of skipPkToNode) {
+      unifiedPkToNode.set(pk, ng)
+    }
+    for (const [pk, ng] of expPkToNode) {
+      const localId = parseInt(pk.split(':')[1])
+      if (localId >= firstLocalID! + skipCount) {
+        unifiedPkToNode.set(pk, ng)
+      }
+    }
+
+    // Resolve all single-guid derived and override entries to nodes
+    for (const [pk, d] of derivedMap) {
+      if (pk.includes('/')) continue // multi-guid → nested instance, skip
+      const ng = unifiedPkToNode.get(pk)
+      if (ng) nodeDerived.set(ng, d)
+    }
+    for (const [pk, ov] of overrideMap) {
+      if (pk.includes('/')) continue
+      const ng = unifiedPkToNode.get(pk)
+      if (ng) nodeOverride.set(ng, ov)
+    }
+  } else {
+    // Fallback: direct index mapping with all derived
+    for (let i = 0; i < Math.min(flatSymbol.length, derived.length); i++) {
+      const node = flatSymbol[i]
+      const d = derived[i]
+      if (node.figma.guid && d.guidPath?.guids?.length) {
+        resolveToNode(guidPathKey(d.guidPath.guids), guidToString(node.figma.guid))
+      }
     }
   }
 
-  // Recursively apply overrides and derived data to each node
+  // Recursively apply resolved overrides and derived data to each node
   function applyToNode(node: TreeNode): TreeNode {
     const nodeKey = node.figma.guid ? guidToString(node.figma.guid) : ''
-    const pathKey = nodeGuidToPathKey.get(nodeKey)
-    if (!pathKey) {
+    const d = nodeDerived.get(nodeKey)
+    const ov = nodeOverride.get(nodeKey)
+
+    if (!d && !ov) {
       return { figma: { ...node.figma }, children: node.children.map(applyToNode) }
     }
 
     const figma = { ...node.figma }
 
     // Apply derived data (pre-computed sizes and transforms for this instance)
-    const d = derivedMap.get(pathKey)
     if (d) {
       if (d.size) figma.size = d.size
       if (d.transform) figma.transform = d.transform
       if (d.fontSize !== undefined) figma.fontSize = d.fontSize
-      if (d.derivedTextData) figma.textData = d.derivedTextData
+      if (d.derivedTextData?.characters !== undefined) figma.textData = d.derivedTextData
     }
 
-    // Apply overrides (fills, arcData, text props customized by this instance)
-    const ov = overrideMap.get(pathKey)
+    // Apply all override properties from the symbolOverride entry
     if (ov) {
-      if (ov.fillPaints) figma.fillPaints = ov.fillPaints
-      if (ov.arcData) figma.arcData = ov.arcData
-      if (ov.textData) figma.textData = ov.textData
-      if (ov.fontSize !== undefined) figma.fontSize = ov.fontSize
-      if (ov.fontName) figma.fontName = ov.fontName
-      if (ov.lineHeight) figma.lineHeight = ov.lineHeight
-      if (ov.letterSpacing) figma.letterSpacing = ov.letterSpacing
+      const skipKeys = new Set([
+        'guidPath', 'guid', 'parentIndex', 'type', 'phase',
+        'symbolData', 'derivedSymbolData', 'componentKey',
+        'variableConsumptionMap', 'parameterConsumptionMap',
+        'prototypeInteractions', 'styleIdForFill', 'styleIdForStrokeFill',
+        'styleIdForText', 'overrideLevel', 'componentPropAssignments',
+        'proportionsConstrained', 'fontVersion',
+      ])
+      for (const key of Object.keys(ov)) {
+        if (skipKeys.has(key)) continue
+        const value = (ov as Record<string, unknown>)[key]
+        if (value !== undefined) {
+          ;(figma as Record<string, unknown>)[key] = value
+        }
+      }
     }
 
     return { figma, children: node.children.map(applyToNode) }
