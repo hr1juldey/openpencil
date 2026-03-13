@@ -29,10 +29,9 @@ function normalizeEnvValue(key: string, value: unknown): string | undefined {
   return undefined
 }
 
-function readClaudeSettingsEnv(): EnvLike {
+function readSingleSettingsFile(filePath: string): EnvLike {
   try {
-    const path = join(homedir(), '.claude', 'settings.json')
-    const raw = readFileSync(path, 'utf-8')
+    const raw = readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw) as ClaudeSettings
     if (!parsed.env || typeof parsed.env !== 'object') return {}
 
@@ -47,6 +46,17 @@ function readClaudeSettingsEnv(): EnvLike {
   } catch {
     return {}
   }
+}
+
+/**
+ * Read env from ~/.claude/settings.json and ~/.claude/settings.local.json.
+ * Local settings take priority (same as Claude Code's own precedence).
+ */
+function readClaudeSettingsEnv(): EnvLike {
+  const claudeDir = join(homedir(), '.claude')
+  const base = readSingleSettingsFile(join(claudeDir, 'settings.json'))
+  const local = readSingleSettingsFile(join(claudeDir, 'settings.local.json'))
+  return { ...base, ...local }
 }
 
 /**
