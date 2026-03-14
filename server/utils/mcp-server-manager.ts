@@ -25,14 +25,6 @@ function killMcpProcessSync(): void {
 // Synchronous cleanup on process exit (last resort)
 process.on('exit', () => killMcpProcessSync())
 
-// Graceful cleanup on signals (e.g. Electron killing Nitro with SIGTERM)
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-  process.on(signal, () => {
-    killMcpProcessSync()
-    process.exit(0)
-  })
-}
-
 /** Resolve the MCP server script path across dev, web build, and Electron production. */
 function resolveMcpServerScript(): string {
   // Electron production: extraResources
@@ -83,11 +75,15 @@ export function startMcpHttpServer(port: number): { running: boolean; port: numb
     // Use spawn instead of fork to avoid IPC channel issues on Windows.
     // fork() creates an IPC channel that, if unused and disconnected, can
     // cause the child process to exit unexpectedly on Windows.
+    // Use detached mode to prevent the MCP server from being killed when
+    // the parent process receives signals (e.g., dialog close, hot-reload).
     mcpProcess = spawn(process.execPath, [serverScript, '--http', '--port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
       windowsHide: true,
+      detached: true,
     })
+    mcpProcess.unref()
 
     mcpPort = port
 

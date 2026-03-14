@@ -31,7 +31,7 @@ export function useElectronMenu() {
           if (!raw.version || (!Array.isArray(raw.children) && !Array.isArray(raw.pages))) return
           const doc = normalizePenDocument(raw)
           const name = filePath.split(/[/\\]/).pop() || 'untitled.op'
-          useDocumentStore.getState().loadDocument(doc, name)
+          useDocumentStore.getState().loadDocument(doc, name, null, filePath)
           requestAnimationFrame(() => zoomToFitContent())
         } catch {
           // Invalid file — ignore
@@ -78,14 +78,21 @@ export function useElectronMenu() {
         case 'save': {
           syncCanvasPositionsToStore()
           const store = useDocumentStore.getState()
-          const { document: doc, fileName, fileHandle } = store
+          const { document: doc, fileName, fileHandle, filePath } = store
 
           if (fileHandle) {
+            // Browser: save via File System Access API
             writeToFileHandle(fileHandle, doc).then(() => store.markClean())
+          } else if (filePath && api?.saveToPath) {
+            // Electron: save to original file path
+            const content = JSON.stringify(doc, null, 2)
+            api.saveToPath(filePath, content).then(() => store.markClean())
           } else if (fileName) {
+            // Fallback: download to Downloads folder
             downloadDocument(doc, fileName)
             store.markClean()
           } else if (supportsFileSystemAccess()) {
+            // New file: show save-as dialog
             saveDocumentAs(doc, 'untitled.op').then((result) => {
               if (result) {
                 useDocumentStore.setState({

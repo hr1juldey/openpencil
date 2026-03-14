@@ -31,6 +31,8 @@ import { createPageActions } from './document-store-pages'
 interface DocumentStoreState {
   document: PenDocument
   fileName: string | null
+  /** Full file path for Electron saves (null in browser or for new documents). */
+  filePath: string | null
   isDirty: boolean
   /** Native file handle for save-in-place (File System Access API). */
   fileHandle: FileSystemFileHandle | null
@@ -92,6 +94,7 @@ interface DocumentStoreState {
     doc: PenDocument,
     fileName?: string,
     fileHandle?: FileSystemFileHandle | null,
+    filePath?: string | null,
   ) => void
   newDocument: () => void
   markClean: () => void
@@ -113,6 +116,7 @@ export const useDocumentStore = create<DocumentStoreState>(
   (set, get) => ({
     document: createEmptyDocument(),
     fileName: null,
+    filePath: null,
     isDirty: false,
     fileHandle: null,
     saveDialogOpen: false,
@@ -710,13 +714,14 @@ export const useDocumentStore = create<DocumentStoreState>(
     applyHistoryState: (doc) =>
       set({ document: doc, isDirty: true }),
 
-    loadDocument: (doc, fileName, fileHandle) => {
+    loadDocument: (doc, fileName, fileHandle, filePath) => {
       useHistoryStore.getState().clear()
       const migrated = ensureDocumentNodeIds(migrateToPages(doc))
       set({
         document: migrated,
         fileName: fileName ?? null,
         fileHandle: fileHandle ?? null,
+        filePath: filePath ?? null,
         isDirty: false,
       })
       // Set active page to the first page
@@ -731,6 +736,7 @@ export const useDocumentStore = create<DocumentStoreState>(
         document: doc,
         fileName: null,
         fileHandle: null,
+        filePath: null,
         isDirty: false,
       })
       useCanvasStore.getState().setActivePageId(doc.pages?.[0]?.id ?? DEFAULT_PAGE_ID)
