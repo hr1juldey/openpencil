@@ -204,14 +204,22 @@ export default function TopBar() {
   const handleSave = useCallback(() => {
     syncCanvasPositionsToStore()
     const store = useDocumentStore.getState()
-    const { document: doc, fileName: fn, fileHandle } = store
+    const { document: doc, fileName: fn, fileHandle, filePath } = store
+    const api = window.electronAPI
 
     if (fileHandle) {
+      // Browser: save via File System Access API
       writeToFileHandle(fileHandle, doc).then(() => store.markClean())
+    } else if (filePath && api?.saveToPath) {
+      // Electron: save to original file path
+      const content = JSON.stringify(doc, null, 2)
+      api.saveToPath(filePath, content).then(() => store.markClean())
     } else if (fn) {
+      // Fallback: download to Downloads folder
       downloadDocument(doc, fn)
       store.markClean()
     } else if (supportsFileSystemAccess()) {
+      // New file: show save-as dialog
       saveDocumentAs(doc, 'untitled.op').then((result) => {
         if (result) {
           useDocumentStore.setState({
